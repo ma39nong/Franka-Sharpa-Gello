@@ -18,6 +18,14 @@ def select_config(config,options):
         item=TopicConfig(old.name if old else ch['source_topic'].strip('/').replace('/','_'),ch['source_topic'],kind,
             required=ch.get('presence_policy')!='conditional',min_frequency_hz=rate,max_gap_ms=500. if '/tactile/' in ch['source_topic'] else 150.)
         (static if snapshot or kind=='std_msgs/msg/UInt64MultiArray' or ch.get('presence_policy')=='conditional' else topics).append(item)
+    if options['format']=='rosbag':
+        existing={topic.topic for topic in (*topics,*static)}
+        for name in ('/tf','/tf_static'):
+            if name not in existing:static.append(TopicConfig(name.strip('/'),name,'tf2_msgs/msg/TFMessage',required=False))
+        # Some legacy profiles omit color intrinsics; every rosbag includes all three.
+        for index in range(3):
+            name=f'/cam{index}/color/camera_info'
+            if name not in existing:static.append(TopicConfig(f'cam{index}_info',name,'sensor_msgs/msg/CameraInfo',required=False))
     provenance=dict(config.provenance,recording_options=options,topics={t.name:dict(topic=t.topic,type=t.type_name,required=t.required,min_frequency_hz=t.min_frequency_hz,max_gap_ms=t.max_gap_ms) for t in topics})
     return replace(config,topics=tuple(topics),static_topics=tuple(static),provenance=provenance)
 
@@ -64,6 +72,10 @@ class RecordingBackend:
         if options['format']=='rosbag':
             from .sensor_readiness import SensorReadiness
             self.presence=SensorReadiness(node,options)
+            try:
+                from .rosbag_calibration import RosbagCalibration
+                backend.calibration=RosbagCalibration(node,profile_path())
+            except (OSError,ValueError,KeyError) as exc:error=str(exc)
         if self.backend:
             if self.last_backend is None and self.backend.last_bag_dir is not None:self.last_backend=self.backend
             close=getattr(self.backend,'close',None)
@@ -74,7 +86,11 @@ class RecordingBackend:
 
     def readiness(self):
         if self.error:return dict(ready=False,message=self.error)
-        if self.presence:return self.presence.snapshot()
+        if self.presence:
+            presence=self.presence.snapshot()
+            if not presence['ready']:return presence
+            calibration=getattr(self.backend,'calibration',None)
+            return calibration.readiness() if calibration else presence
         check=getattr(self.backend,'readiness',None)
         return check() if check else dict(ready=True,message='')
 

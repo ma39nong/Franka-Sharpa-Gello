@@ -206,3 +206,5 @@ provenance 全部验证通过后才原子发布。失败时不改源 bag，也�
 ## MCAP 与可选传感器
 
 统一 GUI 已支持 MCAP/rosbag 切换、头部/双腕深度及触觉选择。准备方法、归档兼容性和验收命令见 [MCAP_RECORDING.md](docs/MCAP_RECORDING.md)。
+
+GELLO/Sharpa 与 DAgger 的 rosbag 动作、标定、任务元数据约定及保留差异，见 [ROSBAG_DAGGER_ALIGNMENT.md](docs/ROSBAG_DAGGER_ALIGNMENT.md)。

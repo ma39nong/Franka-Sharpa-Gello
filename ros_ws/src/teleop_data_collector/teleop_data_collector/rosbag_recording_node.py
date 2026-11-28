@@ -126,6 +126,9 @@ class RosbagEpisodeRecorder:
         self._milestones: list[dict[str, Any]] = []
         self._source_recording_id: str | None = None
         self._live_continuity_report: dict[str, Any] = {}
+        self.calibration = None
+        self._calibration_snapshot = None
+        self._task_metadata_snapshot: dict[str, Any] = {}
 
     @property
     def active(self) -> bool:
@@ -176,6 +179,11 @@ class RosbagEpisodeRecorder:
         if failures:
             raise RuntimeError("Recording preflight failed: " + "; ".join(failures))
 
+        from copy import deepcopy
+        calibration_snapshot=(self.calibration.capture(int(self._node.get_clock().now().nanoseconds))
+                              if self.calibration is not None else None)
+        self._task_metadata_snapshot=deepcopy(getattr(self,'task_metadata',{}))
+        self._calibration_snapshot=calibration_snapshot
         self._output_dir.mkdir(parents=True, exist_ok=True)
         bag_dir = self._next_episode_dir(archive_parent)
         self._milestones = []
@@ -275,6 +283,11 @@ class RosbagEpisodeRecorder:
         self._remove_generated_qos_file()
         self.on_recording_stopped()
         failures = ()
+        calibration_failures = ()
+        if self._calibration_snapshot is not None and int(process.returncode or 0)==0:
+            from .rosbag_calibration import append_snapshots
+            try:append_snapshots(bag_dir,self._calibration_snapshot)
+            except Exception as error:calibration_failures=(f'calibration snapshot archival failed: {error}',)
         validation_report: dict[str, Any] = {}
         if self._postflight is not None and int(process.returncode or 0) == 0:
             validation_started = time.monotonic()
@@ -286,7 +299,7 @@ class RosbagEpisodeRecorder:
             self._node.get_logger().info(
                 f"Validation finished in {time.monotonic() - validation_started:.2f}s."
             )
-        failures = tuple(failures) + tuple(self._live_continuity_report.get("failures", []))
+        failures = tuple(failures) + calibration_failures + tuple(self._live_continuity_report.get("failures", []))
         self._validation_report = validation_report
         outcome = recording_outcome(
             exit_code=int(process.returncode or 0),
@@ -372,6 +385,7 @@ class RosbagEpisodeRecorder:
             **self._provenance,
             "source_bag": str(bag_dir.resolve()),
             "source_recording_id": self._source_recording_id,
+            "task_metadata": self._task_metadata_snapshot,
             "milestones": self.milestones,
             "source_topic_contract": self._provenance.get("topics", {}),
             "state": state,
@@ -401,6 +415,9 @@ class RosbagEpisodeRecorder:
             self._state_path = final_path
         else:
             self._state_path = sidecar
+
+    def close(self) -> None:
+        if self.calibration is not None:self.calibration.close()
 
     def _next_episode_dir(self, archive_parent: Path | None = None) -> Path:
         return allocate_episode(self._output_dir, self._bag_prefix, archive_parent)

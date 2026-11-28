@@ -1,5 +1,8 @@
 # GELLO 双臂 + MANUS/Sharpa 双手 + 三相机录制
 
+与 DAgger 对齐后的 rosbag 动作、标定、任务元数据及仍保留的差异见
+[ROSBAG_DAGGER_ALIGNMENT.md](ROSBAG_DAGGER_ALIGNMENT.md)。
+
 需要把整套三终端工作流迁移到另一台电脑时，参见
 [`工程迁移与一键安装说明.md`](../../工程迁移与一键安装说明.md)。该文档包含原电脑
 打包、新电脑安装、端口修改和首次硬件检查清单。
