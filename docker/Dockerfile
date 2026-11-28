@@ -132,6 +132,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && python3 -m pip install --no-cache-dir 'pyarrow==17.0.0' \
     && rm -rf /var/lib/apt/lists/*
 
+# ROS Python dependencies for direct MCAP capture (separate from LeRobot venv).
+RUN python3 -m pip install --no-cache-dir 'mcap==1.3.1' 'mcap-ros2-support==0.5.7' 'rosbags==0.11.0' 'av==17.0.0' 'numpy==1.26.4'
+
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

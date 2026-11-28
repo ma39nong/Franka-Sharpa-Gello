@@ -363,6 +363,7 @@ services:
       - ${TELEOP_DATA_ROOT:?Missing TELEOP_DATA_ROOT in docker/.env}:/data
       - /dev:/dev
       - ${TELEOP_CAMERA_CONFIG:-../data_collection/config/cameras.yaml}:/collection_camera_config.yaml:ro
+      - ${TELEOP_CAMERA_PROFILE_DIR:-../ros_ws/src/teleop_camera_bringup/config}:${TELEOP_CAMERA_PROFILE_DIR:-/collection_camera_profiles}:ro
       - ${TELEOP_DATA_ROOT:?Missing TELEOP_DATA_ROOT in docker/.env}:/collection_data
     command:
       - ros2

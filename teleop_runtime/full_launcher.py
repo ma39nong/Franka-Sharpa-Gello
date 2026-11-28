@@ -50,6 +50,8 @@ def session_config(args):
         permit=load_permit(args.validation_permit)
         data.update(mode='supervised_hardware_validation',permit=str(Path(args.validation_permit).resolve()),token=permit['session_token'])
     elif args.validation_permit:raise ValueError('Validation permit only belongs to supervised validation')
+    from teleop_runtime.recording_settings import read_settings
+    data['record_tactile']=read_settings()['tactile']
     return data
 
 

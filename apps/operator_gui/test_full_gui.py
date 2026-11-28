@@ -725,3 +725,12 @@ def test_task_cleanup_does_not_block_gui_timers(tmp_path,monkeypatch):
         release.set()
         if window.task_edit_pending:_wait_task_edit(window,app)
         window.close();app.processEvents()
+
+
+@pytest.fixture(autouse=True)
+def legacy_recording_preferences(tmp_path,monkeypatch):
+    # These tests exercise the pre-format-selection collector interface.
+    path=tmp_path/'legacy-recording.json'
+    path.write_text('{"format":"rosbag","head_depth":true,"wrist_depth":false,"tactile":false}')
+    monkeypatch.setenv('COLLECTION_RECORDING_CONFIG',str(path))
+    monkeypatch.setenv('OPERATOR_TASKS_FILE',str(tmp_path/'tasks.json'))

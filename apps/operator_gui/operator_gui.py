@@ -30,6 +30,7 @@ from PySide6.QtNetwork import QAbstractSocket, QTcpSocket
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -57,7 +58,7 @@ from PySide6.QtWidgets import (
 from teleop_runtime.transfer_settings import read_settings as read_transfer_settings, update_settings as update_transfer_settings
 
 from operator_tasks import (DEFAULT_OPERATOR_TASK, get_operator_tasks, task_label,
-                            add_operator_task, delete_operator_task)
+                            add_operator_task, delete_operator_task, task_description, set_task_description)
 
 POLL_INTERVAL_MS = 500
 RECONNECT_INTERVAL_MS = 2000
@@ -538,6 +539,13 @@ class OperatorWindow(QMainWindow):
             font.setPointSizeF(font.pointSizeF() + 2)
             control.setFont(font)
         controls_grid.addLayout(actions, 2, 1)
+        self.task_description_edit=QLineEdit(task_description(self.current_task))
+        self.task_description_edit.setPlaceholderText('英文任务描述（留空时使用任务名称）')
+        self.task_description_edit.setMaxLength(4000)
+        self.task_description_edit.editingFinished.connect(self._save_task_description)
+        self.task_selector.currentIndexChanged.connect(self._load_task_description)
+        controls_grid.addWidget(QLabel('任务描述'),3,0)
+        controls_grid.addWidget(self.task_description_edit,3,1)
         layout.addLayout(controls_grid)
 
         log_heading_row = QHBoxLayout()
@@ -679,6 +687,24 @@ class OperatorWindow(QMainWindow):
             + self.status_label.frameWidth() + int(self.status_label.document().documentMargin())
         )
         column.addWidget(self.storage_heading)
+        from teleop_runtime.recording_settings import read_settings
+        options=read_settings()
+        column.addWidget(QLabel('样本保存方式'))
+        self.recording_format=QComboBox()
+        arrow=(REPO_ROOT/'apps/operator_gui/assets/dropdown_arrow.svg').as_posix()
+        self.recording_format.setStyleSheet(f'QComboBox::down-arrow {{ image: url({arrow}); width: 12px; height: 12px; }}')
+        self.recording_format.addItem('MCAP','mcap');self.recording_format.addItem('rosbag','rosbag')
+        self.recording_format.setCurrentIndex(self.recording_format.findData(options['format']))
+        column.addWidget(self.recording_format)
+        self.recording_sensor_boxes={}
+        for key,label in [('head_depth','录制头部相机深度'),('wrist_depth','录制腕部相机深度'),('tactile','录制双手触觉')]:
+            box=QCheckBox(label);box.setChecked(options[key]);column.addWidget(box)
+            self.recording_sensor_boxes[key]=box
+            box.toggled.connect(self._recording_options_changed)
+        self.recording_format.currentIndexChanged.connect(self._recording_options_changed)
+        self.recording_options_hint=QLabel('选择会自动保存；尚未启动的传感器在下次正常启动后生效。')
+        self.recording_options_hint.setWordWrap(True)
+        column.addWidget(self.recording_options_hint)
         self.storage_parent_label = QLabel("保存父目录")
         self.storage_parent_label.setFont(self.status_label.font())
         column.addWidget(self.storage_parent_label)
@@ -726,6 +752,33 @@ class OperatorWindow(QMainWindow):
         column.addStretch(1)
         self._update_storage_preview()
         return panel
+
+    def _recording_options(self):
+        return dict(format=self.recording_format.currentData(),**{key:box.isChecked() for key,box in self.recording_sensor_boxes.items()})
+
+    def _recording_options_changed(self,*unused):
+        from teleop_runtime.recording_settings import update_settings
+        try:update_settings(**self._recording_options())
+        except (OSError,ValueError) as error:
+            self.recording_options_hint.setText('设置保存失败：'+str(error));return
+        self.recording_options_hint.setText('设置已保存；未启动的传感器需下次正常启动后生效。')
+        self._sync_recording_options()
+
+    def _sync_recording_options(self):
+        settings=self.collection_status.get('recording_settings') or {}
+        if not settings.get('supported'):return
+        if self.collection_state in {'STARTING','RECORDING','STOPPING','VALIDATING'} or self.collection_status.get('quality_pending'):return
+        if self.collection_pending:return
+        if settings.get('options')!=self._recording_options():
+            self._send_collection('configure_recording',self._recording_options())
+
+    def _save_task_description(self):
+        try:set_task_description(self._selected_task(),self.task_description_edit.text())
+        except (OSError,ValueError) as error:self.feedback.appendPlainText('任务描述保存失败：'+str(error))
+
+    def _load_task_description(self,*unused):
+        if hasattr(self,'task_description_edit'):
+            self.task_description_edit.setText(task_description(self._selected_task()))
 
     def _update_storage_preview(self, *_args) -> None:
         parent = self.storage_parent_edit.text().strip()
@@ -888,6 +941,7 @@ class OperatorWindow(QMainWindow):
         self.task_selector.blockSignals(False)
         self.current_task=selected
         self.settings.setValue('operator_task',selected)
+        self._load_task_description()
 
     def _task_action_selected(self, index: int) -> None:
         action=str(self.task_selector.itemData(index))
@@ -944,7 +998,7 @@ class OperatorWindow(QMainWindow):
         else:
             self._reload_task_selector(result or None)
             self.feedback.appendPlainText('任务已保存，请分别记录左右臂 Home。' if action=='add' else '任务及其 Home、对应轨迹已永久删除。')
-        self.task_selector.setEnabled(not getattr(self,'arm_home_locked',False))
+        self.task_selector.setEnabled(not getattr(self,'arm_home_locked',False) and self.collection_state not in {'STARTING','RECORDING','STOPPING','VALIDATING'})
         self._poll_status()
         self._poll_collection_status()
 
@@ -1136,7 +1190,7 @@ class OperatorWindow(QMainWindow):
             self.home_both_button.setEnabled(False)
         if self.hand_client is not None:self._apply_hand_status(self.hand_status)
         self.connect_action.setEnabled(state != "connected")
-        self.task_selector.setEnabled(not getattr(self,"arm_home_locked",False) and not self.task_edit_pending)
+        self.task_selector.setEnabled(not getattr(self,"arm_home_locked",False) and not self.task_edit_pending and self.collection_state not in {"STARTING","RECORDING","STOPPING","VALIDATING"})
         if state == "disconnected":
             self._set_system_status(
                 "DISCONNECTED — backend status unavailable"
@@ -1287,6 +1341,8 @@ class OperatorWindow(QMainWindow):
         if command == "start":
             self.camera_preview.update_collection_status(dict(self.collection_status, active=True, state='STARTING'))
             self.collection_state = "STARTING"
+            for control in [self.recording_format,*self.recording_sensor_boxes.values(),self.task_selector,self.task_description_edit]:
+                control.setEnabled(False)
             self.collection_status_label.setText("STARTING — 正在启动新 episode…")
             self.collection_status_label.setToolTip("")
             self.collection_status_label.setStyleSheet("color: #777; font-weight: bold;")
@@ -1352,6 +1408,13 @@ class OperatorWindow(QMainWindow):
                 return
             self._remember_storage_parent()
             arguments = dict(arguments or {}, storage_parent=self.storage_parent_edit.text().strip())
+        if command=='start':
+            if not (self.collection_status.get('recording_settings') or {}).get('supported') and self._recording_options()['format']=='mcap':
+                self.feedback.appendPlainText('当前采集器不支持格式选择，请更新并重启采集器。');return
+            if (self.collection_status.get('recording_settings') or {}).get('supported'):
+                self._save_task_description()
+                arguments=dict(arguments or {},task_metadata=dict(task_id=self._selected_task(),task_name=task_label(self._selected_task()),
+                    task_description=self.task_description_edit.text().strip() or task_label(self._selected_task())))
         if arguments is None:
             self._send_collection(command)
         else:
@@ -1466,7 +1529,14 @@ class OperatorWindow(QMainWindow):
         else:
             style = "color: #777; font-weight: bold;"
         self.collection_status_label.setStyleSheet(style)
-        can_start = bool(status.get("can_start")) and not getattr(self, "arm_home_locked", False) and not self.task_edit_pending
+        busy=state in {'STARTING','RECORDING','STOPPING','VALIDATING'}
+        for control in [self.recording_format,*self.recording_sensor_boxes.values(),self.task_description_edit]:control.setEnabled(not busy)
+        self.task_selector.setEnabled(not busy and not getattr(self,"arm_home_locked",False) and not self.task_edit_pending)
+        compatible=bool((status.get('recording_settings') or {}).get('supported'))
+        if not compatible:self.recording_options_hint.setText('采集器版本较旧，需更新才能选择保存方式和传感器。')
+        options_match=not compatible or status['recording_settings'].get('options')==self._recording_options()
+        self._sync_recording_options()
+        can_start = options_match and bool(status.get("can_start")) and not getattr(self, "arm_home_locked", False) and not self.task_edit_pending
         if (status.get("storage_settings") or {}).get("supported") and not self.storage_parent_edit.text().strip():
             can_start = False
         can_stop = bool(status.get("can_stop"))
@@ -1655,7 +1725,7 @@ class OperatorWindow(QMainWindow):
             )
         self.home_both_button.setEnabled(self.arms_available and not home_locked and not self.task_edit_pending)
         # Task setup remains available while arms are offline.
-        self.task_selector.setEnabled(not home_locked and not self.task_edit_pending)
+        self.task_selector.setEnabled(not home_locked and not self.task_edit_pending and self.collection_state not in {"STARTING","RECORDING","STOPPING","VALIDATING"})
         feedback = status.get("feedback", [])
         # Re-render the ring wholesale: the server caps it at 50 lines, so
         # replacing the text is the simplest correct display.

@@ -71,8 +71,8 @@ class RosbagDataCollectorNode(Node):
         available = dict(self.get_topic_names_and_types())
         configured = tuple(
             TopicContract(topic.name, topic.topic, topic.type_name, topic.required)
-            for topic in self.config.topics
-            if detection_enabled(topic.topic, getattr(self.config, "tactile_detection_enabled", True))
+            for topic in (*self.config.topics,*getattr(self.config,"static_topics",()))
+            if detection_enabled(topic.topic, getattr(self.config, "tactile_detection_enabled", True)) or getattr(self.config,"provenance",{}).get("recording_options",{}).get("tactile",False)
         )
         return topic_preflight_failures(configured, available)
 
@@ -419,26 +419,31 @@ class RosbagEpisodeRecorder:
 def main(args=None):
     rclpy.init(args=args)
     node = RosbagDataCollectorNode()
-    recorder = RosbagEpisodeRecorder(
-        node=node,
-        output_dir=node.output_dir,
-        bag_prefix=node.bag_prefix,
-        topics=node.topic_names,
-        stop_timeout_sec=node.stop_timeout_sec,
-        rosbag_record_args=tuple(node.rosbag_record_args),
-        default_qos=node.rosbag_record_default_qos,
-        provenance=node.config.provenance,
-        preflight=node.preflight_failures,
-        postflight=node.postflight,
-    )
+    from .recording_backend import RecordingBackend
+    recorder = RecordingBackend(node)
+    from .live_continuity import LiveContinuity
     live = None
-    if node.config.continuity_enabled or node.config.rgb_preflight_enabled:
+    if node.config.continuity_enabled or node.config.rgb_preflight_enabled or recorder.options:
         from .live_continuity import LiveContinuity
         live = LiveContinuity(node, recording_active=lambda: recorder.active)
         if node.config.continuity_enabled:
             node.continuity_monitor = live.monitor
         node.collection_readiness = live.readiness
     controller = CollectorController(node, recorder)
+    def reconfigure(options):
+        nonlocal live
+        from teleop_runtime.recording_settings import validate_options
+        options=validate_options(options)
+        if options==recorder.options:return
+        if live is not None:live.close()
+        try:recorder.configure(options)
+        finally:
+            live=LiveContinuity(node,recording_active=lambda:recorder.active)
+            controller._monitor=live.monitor if node.config.continuity_enabled else None
+            controller._readiness=live.readiness
+            live.start(node,controller)
+    node.configure_recording=reconfigure
+
     control_server = CollectorControlServer(
         (node.control_bind_host, node.control_port), controller
     )
@@ -473,6 +478,7 @@ def main(args=None):
                         controller.mark_milestone()
                     except (RuntimeError, OSError) as error:
                         node.get_logger().warn(str(error))
+                recorder.watchdog()
                 if recorder.current_bag_dir is not None and not recorder.active:
                     controller.reconcile_exited_recorder()
                 time.sleep(0.05)
@@ -489,6 +495,7 @@ def main(args=None):
         controller.wait_for_finalization()
         if live is not None:
             live.close()
+        recorder.close()
         control_server.shutdown()
         control_server.server_close()
         node.destroy_node()

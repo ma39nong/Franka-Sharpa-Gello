@@ -1,3 +1,4 @@
+import pytest
 import multiprocessing
 import json
 import os
@@ -696,3 +697,12 @@ def test_new_episode_clears_old_collection_display_before_start_reply(tmp_path):
     finally:
         window.close()
         application.processEvents()
+
+
+@pytest.fixture(autouse=True)
+def legacy_recording_preferences(tmp_path,monkeypatch):
+    # These tests exercise the pre-format-selection collector interface.
+    path=tmp_path/'legacy-recording.json'
+    path.write_text('{"format":"rosbag","head_depth":true,"wrist_depth":false,"tactile":false}')
+    monkeypatch.setenv('COLLECTION_RECORDING_CONFIG',str(path))
+    monkeypatch.setenv('OPERATOR_TASKS_FILE',str(tmp_path/'tasks.json'))

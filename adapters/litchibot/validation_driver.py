@@ -215,6 +215,21 @@ def main(argv=None):
                         'diagnostics_enabled':diagnostics_enabled,
                         'tactile_batching_enabled':batching_enabled,
                         'udp_buffer_tuning_enabled':udp_enabled and not software}))
+                if config and config.get('record_tactile') and not software:
+                    # Same SDK handles, read-only telemetry, no additional device owner.
+                    old=getattr(self,'full_tactile',None)
+                    if old:old.close()
+                    if self._tactile_timer is not None:
+                        self.destroy_timer(self._tactile_timer);self._tactile_timer=None
+                    from adapters.litchibot.recording_tactile import TactileTelemetry
+                    self.full_tactile=TactileTelemetry(self,{side.value:hand for side,hand in self._hands.items()})
+                    self.full_tactile.start()
+                    # Keep SDK access on the original owner thread, with two
+                    # fingers per timer turn just like normal-mode telemetry.
+                    import math
+                    rounds=math.ceil(len(self.full_tactile.routes)/self.full_tactile.batch_size)
+                    rate=float(self.get_parameter('tactile_poll_rate_hz').value)
+                    self._tactile_timer=self.create_timer(1.0/(rate*rounds),self._publish_tactile)
             except Exception:
                 self.destroy_node();raise
 

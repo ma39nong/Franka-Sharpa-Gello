@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Container-side supervisor for persistent Sharpa episode collection.
 set -euo pipefail
+export PYTHONPATH="/workspace/franka_upper_body_teleop${PYTHONPATH:+:$PYTHONPATH}"
 
 : "${COLLECTION_RECORD_CONFIG:?}"
 : "${COLLECTION_OUTPUT_DIR:?}"
@@ -73,7 +74,9 @@ PY_CONFIG
     if [[ "$continuity_enabled" == true ]]; then
       source_readiness_args+=(--require-source-timestamps)
     fi
-    echo "Waiting for four camera streams to deliver stable frames..."
+    depth_selection="$(python3 -c 'from teleop_runtime.recording_settings import read_settings; o=read_settings(); print("all" if o["head_depth"] and o["wrist_depth"] else "head" if o["head_depth"] else "wrist" if o["wrist_depth"] else "none")')"
+    source_readiness_args+=(--depth-selection "$depth_selection")
+    echo "Waiting for selected camera streams to deliver stable frames..."
     setsid python3 -m teleop_data_collector.camera_stream_health wait \
       --timeout-sec "$COLLECTION_CAMERA_READY_TIMEOUT_SEC" \
       --stable-sec 3 \
@@ -141,6 +144,15 @@ if [[ "$COLLECTION_WITH_CAMERAS" == false ]]; then
 fi
 
 echo "Sharpa collector is starting. Use the operator GUI to record episodes."
+collection_mcap_deps=/workspace/franka_upper_body_teleop/.runtime/mcap-python
+if [[ -d "$collection_mcap_deps" ]]; then
+  export PYTHONPATH="$collection_mcap_deps${PYTHONPATH:+:$PYTHONPATH}"
+  export COLLECTION_RVL_LIBRARY="$collection_mcap_deps/mcap-rvl.so"
+fi
+if [[ ! -f "${COLLECTION_RVL_LIBRARY:-/nonexistent}" ]]; then
+  export COLLECTION_RVL_LIBRARY=/tmp/gello-mcap-rvl.so
+  g++ -O3 -shared -fPIC /workspace/franka_upper_body_teleop/ros_ws/src/teleop_data_collector/teleop_data_collector/rvl_encode.cpp -o "$COLLECTION_RVL_LIBRARY"
+fi
 collector_executable="/workspace/franka_upper_body_teleop/ros_ws/install/teleop_data_collector/lib/teleop_data_collector/rosbag_data_collector"
 [[ -x "$collector_executable" ]] || {
   echo "Collector executable is missing; rebuild the ROS workspace." >&2

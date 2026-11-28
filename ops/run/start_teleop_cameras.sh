@@ -15,7 +15,9 @@ for arg in "$@"; do
       config="$arg"; config_set=true ;;
   esac
 done
+config="$(PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" /usr/bin/python3 -m teleop_runtime.recording_settings --camera-config "$config")"
 export TELEOP_CAMERA_CONFIG="$(realpath -- "$config")"
+export TELEOP_CAMERA_PROFILE_DIR="$(dirname -- "$TELEOP_CAMERA_CONFIG")"
 [[ -f "$TELEOP_CAMERA_CONFIG" ]] || { echo "Missing camera config: $config" >&2; exit 2; }
 export ORBBEC_SDK_LICENSE_ACCEPTED="${ORBBEC_SDK_LICENSE_ACCEPTED:-$(deployment_env_value "$REPO_ROOT/docker/.env" ORBBEC_SDK_LICENSE_ACCEPTED)}"
 [[ "$ORBBEC_SDK_LICENSE_ACCEPTED" == YES ]] || { echo 'Orbbec SDK license acceptance is required in docker/.env.' >&2; exit 2; }
@@ -57,10 +59,11 @@ fi
 ready_timeout="${CAMERA_READY_TIMEOUT_SEC:-90}"
 probe_timeout="$ready_timeout"
 [[ "$reused" == false ]] || probe_timeout="${CAMERA_REUSE_PROBE_SEC:-8}"
+depth_selection="$(PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" /usr/bin/python3 -c 'from teleop_runtime.recording_settings import read_settings; o=read_settings(); print("all" if o["head_depth"] and o["wrist_depth"] else "head" if o["head_depth"] else "wrist" if o["wrist_depth"] else "none")')"
 wait_frames() {
   docker compose exec -T teleop-cameras /entrypoint.sh \
     python3 -m teleop_data_collector.camera_stream_health wait \
-    --timeout-sec "$1" --stable-sec 3 --max-gap-ms 150 --no-frames-exit-code 3
+    --timeout-sec "$1" --depth-selection "$depth_selection" --stable-sec 3 --max-gap-ms 150 --no-frames-exit-code 3
 }
 if wait_frames "$probe_timeout"; then exit 0; else result=$?; fi
 # An interrupted probe, Docker error, low FPS or timestamp fault must not trigger

@@ -15,6 +15,7 @@ setup(
         ("share/" + package_name, ["package.xml", "README.md"]),
         ("share/" + package_name + "/launch", ["launch/collector.launch.py"]),
     ],
+    package_data={package_name: ['rvl_encode.cpp']},
     install_requires=["setuptools", "numpy", "pyarrow"],
     tests_require=["pytest"],
     zip_safe=True,

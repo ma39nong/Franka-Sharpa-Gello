@@ -24,6 +24,7 @@ class CameraReadiness:
 
     def __init__(self, topics: list[str], *, rgb_enabled=False, rgb_threshold=25.0, rgb_stable_sec=3.0):
         frequencies = dict(CAMERA_STREAMS)
+        frequencies.update({'/cam1/depth/image_raw':25.,'/cam2/depth/image_raw':25.})
         self._windows = {topic: StreamWindow(topic, frequencies[topic], require_source_timestamps=True)
                          for topic in topics if topic in frequencies}
         from teleop_core.contract import CAMERA_COLOR_TOPIC
@@ -346,6 +347,7 @@ def main(argv: list[str] | None = None) -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
     wait_parser = subparsers.add_parser("wait")
     wait_parser.add_argument("--require-source-timestamps", action="store_true")
+    wait_parser.add_argument("--depth-selection", choices=("none","head","wrist","all"))
     wait_parser.add_argument("--no-frames-exit-code", type=int, choices=(1, 3), default=1)
     wait_parser.add_argument("--timeout-sec", type=float, default=90.0)
     wait_parser.add_argument("--stable-sec", type=float, default=DEFAULT_STABLE_SEC)
@@ -353,6 +355,10 @@ def main(argv: list[str] | None = None) -> None:
     validate_parser = subparsers.add_parser("validate")
     validate_parser.add_argument("bag", type=Path)
     args = parser.parse_args(argv)
+    if args.command=='wait' and args.depth_selection is not None:
+        global CAMERA_STREAMS
+        cameras=(['cam0'] if args.depth_selection in ('head','all') else [])+(['cam1','cam2'] if args.depth_selection in ('wrist','all') else [])
+        CAMERA_STREAMS=tuple((f'/cam{i}/color/image_raw',18. if i==0 else 25.) for i in range(3))+tuple((f'/{c}/depth/image_raw',18. if c=='cam0' else 25.) for c in cameras)
 
     if args.command == "wait":
         if (

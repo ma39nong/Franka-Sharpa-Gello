@@ -86,13 +86,16 @@ def deleted_operator_tasks(path=None) -> set[str]:
     return set(deleted)
 
 
-def _write_registry(path,tasks,deleted):
+def _write_registry(path,tasks,deleted,descriptions=None):
     temporary=None
     try:
         with tempfile.NamedTemporaryFile(mode='w',encoding='utf-8',dir=path.parent,
                 prefix='.tasks-',delete=False) as stream:
             temporary=Path(stream.name)
-            json.dump(dict(version=1,tasks=tasks,deleted_tasks=sorted(deleted)),stream,
+            if descriptions is None:
+                descriptions = json.loads(path.read_text()).get('task_descriptions', {}) if path.exists() else {}
+            json.dump(dict(version=1,tasks=tasks,deleted_tasks=sorted(deleted),
+                           task_descriptions={k:v for k,v in descriptions.items() if k in tasks}),stream,
                       ensure_ascii=False,indent=2)
             # Container-created task lists must remain readable by the host GUI.
             os.fchmod(stream.fileno(),0o644)
@@ -210,3 +213,27 @@ def delete_operator_task(task: str) -> None:
     except (PermissionError,ModuleNotFoundError):
         if os.environ.get('TELEOP_TASK_HELPER'):raise
         return _delegate_task_edit('delete',task)
+
+
+def task_description(task: str) -> str:
+    try:
+        document=json.loads(task_registry_path().read_text())
+    except FileNotFoundError:
+        return ''
+    return str(document.get('task_descriptions',{}).get(task,'')).strip()
+
+
+def set_task_description(task: str, description: str) -> None:
+    if not isinstance(description,str) or len(description)>4000 or '\x00' in description:
+        raise ValueError('任务描述须不超过4000字符')
+    if task_description(task)==description.strip():return
+    try:
+        with task_registry_lock() as path:
+            tasks=get_operator_tasks(path)
+            if task not in tasks:raise ValueError('任务已不存在')
+            document=json.loads(path.read_text()) if path.exists() else {}
+            descriptions=dict(document.get('task_descriptions',{}));descriptions[task]=description.strip()
+            _write_registry(path,tasks,deleted_operator_tasks(path),descriptions)
+    except PermissionError:
+        if os.environ.get('TELEOP_TASK_HELPER'):raise
+        _delegate_task_edit('describe',json.dumps(dict(task=task,description=description),ensure_ascii=False))

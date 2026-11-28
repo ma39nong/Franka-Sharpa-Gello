@@ -20,7 +20,7 @@ Usage: ./ops/run/start_sharpa_arm_recording_with_tactile.sh [--with-cameras]
        [--camera-ready-timeout SECONDS]
 
 The default data root is TELEOP_DATA_ROOT from docker/.env. Start the arms and
-the CycloneDDS Sharpa wrapper first. All 20 tactile streams are required. This
+the CycloneDDS Sharpa wrapper first. GUI-selected sensors are required. This
 command starts a persistent collector; use the operator GUI to start and stop
 each episode. Rate each completed episode before starting the next one.
 Use Ctrl-C only to exit the collector after the current episode is stopped.
@@ -192,6 +192,8 @@ if [[ "$INCLUDE_HANDS" == true ]]; then
 fi
 
 TACTILE_FINGERS=(thumb index middle ring pinky)
+record_tactile="$(PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" /usr/bin/python3 -c 'from teleop_runtime.recording_settings import read_settings; print("true" if read_settings()["tactile"] else "false")')"
+if [[ "$record_tactile" == true ]]; then
 for side in left right; do
   for finger in "${TACTILE_FINGERS[@]}"; do
     TOPICS+=(
@@ -204,6 +206,7 @@ for side in left right; do
     )
   done
 done
+fi
 readonly -a TOPICS EXPECTED_TYPES TACTILE_FINGERS
 
 cd "$REPO_ROOT/docker"

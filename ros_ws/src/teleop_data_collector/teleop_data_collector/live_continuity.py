@@ -18,6 +18,7 @@ class LiveContinuity:
         from rclpy.serialization import deserialize_message
         from rosidl_runtime_py.utilities import get_message
 
+        self._node=node
         required = [topic for topic in node.config.topics if topic.required
                     and detection_enabled(topic.topic, getattr(node.config, "tactile_detection_enabled", True))]
         self.monitor = ContinuityMonitor([topic.topic for topic in required],
@@ -156,3 +157,7 @@ class LiveContinuity:
         if self._thread is not None:
             self._thread.join()
             self._executor.shutdown()
+            self._executor.remove_node(self._node)
+        for subscription in self._subscriptions:
+            self._node.destroy_subscription(subscription)
+        self._subscriptions=[]

@@ -87,7 +87,8 @@ class Watcher:
                 del self.candidates[key]
                 continue
             try:
-                fingerprint=(path/'collection_state.json').stat().st_mtime_ns
+                metadata=path/('episode.json' if (path/'data.mcap').is_file() else 'collection_state.json')
+                fingerprint=metadata.stat().st_mtime_ns
                 if fingerprint!=previous:
                     self.candidates[key]=(path,fingerprint,now)
                     continue

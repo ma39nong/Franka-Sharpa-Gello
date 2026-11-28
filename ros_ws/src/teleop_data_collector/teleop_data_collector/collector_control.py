@@ -70,10 +70,13 @@ class CollectorController:
         health = self._monitor.snapshot() if self._monitor is not None else {}
         busy = phase in {"STOPPING", "VALIDATING"}
         readiness = self._readiness.snapshot(time.monotonic()) if self._readiness is not None else {"ready": True}
+        backend_readiness = getattr(self._recorder,'readiness',lambda:dict(ready=True))()
+        if not backend_readiness['ready']:readiness=backend_readiness
         ready = ready and readiness["ready"]
         if phase == "READY" and not ready:
             phase = "WAITING"
         return {
+            "recording_settings": {"supported": hasattr(self._recorder,'configure'), "options": getattr(self._recorder,'options',None)},
             "after_home": after_home,
             "storage": storage,
             "storage_settings": {"supported": hasattr(self._recorder, "archive_quality"),
@@ -110,7 +113,7 @@ class CollectorController:
             "can_discard": not active and bag_available and not busy,
         }
 
-    def start(self, return_arm_home: dict | None = None, storage_parent: str | None = None) -> dict[str, Any]:
+    def start(self, return_arm_home: dict | None = None, storage_parent: str | None = None, task_metadata: dict | None = None) -> dict[str, Any]:
         with self._operation_lock, self._home_io_lock:
             with self._state_lock:
                 if self._storage and (self._storage["state"] != "saved" or self._quality is None):
@@ -143,6 +146,9 @@ class CollectorController:
                 if not hasattr(self._recorder, "archive_quality"):
                     raise RuntimeError("当前采集器不支持分类归档，请更新后重启")
                 parent = prepare_parent(storage_parent)
+            if task_metadata is not None:
+                if not isinstance(task_metadata,dict) or any(not isinstance(v,str) or len(v)>4000 for v in task_metadata.values()):raise ValueError('Invalid task metadata')
+                self._recorder.task_metadata=dict(task_metadata)
             bag_dir = self._recorder.start(archive_parent=parent) if parent is not None else self._recorder.start()
             if self._monitor is not None:
                 self._monitor.begin(bag_dir.name, time.monotonic())
@@ -357,10 +363,12 @@ class CollectorController:
         bag = self._recorder.last_bag_dir
         if not complete or bag is None or not (home or storage):
             return
-        path = bag / "collection_state.json"
+        mcap=(bag/'episode.json').is_file() and (bag/'data.mcap').is_file()
+        path = bag / ('episode.json' if mcap else 'collection_state.json')
         if storage and not bag.is_dir():
             return  # An independently verified transfer may have removed it.
-        state = json.loads(path.read_text(encoding="utf-8"))
+        document = json.loads(path.read_text(encoding="utf-8"))
+        state = document.setdefault('collection',{}) if mcap else document
         state.update(after_home=home, quality=quality)
         if storage:
             state.update(storage=storage, source_bag=str(bag.resolve()),
@@ -369,10 +377,24 @@ class CollectorController:
                     and self._phase not in {"STOPPING", "VALIDATING"})
         temporary = path.with_suffix(".home.tmp")
         with temporary.open("w", encoding="utf-8") as stream:
-            stream.write(json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+            stream.write(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
         temporary.replace(path)
+        if mcap:
+            from .mcap_util import write_json
+            from .mcap_storage import seal
+            grade=QUALITY_FOLDERS.get(quality)
+            previous=document.get('quality',{})
+            if grade and previous.get('grade')!=grade:
+                history=list(previous.get('history',[]));revision=previous.get('revision',0)+1
+                history.append(dict(grade=grade,label=quality,note='',revision=revision,rated_unix_ns=time.time_ns()))
+                document['quality']=dict(schema='sharpa.recording-quality.v1',recording_format='mcap',
+                    archive=dict(root=storage.get('parent'),episode=bag.name,layout='bag-episode-v1'),
+                    run_id=document['recording_id'],grade=grade,label=quality,note='',revision=revision,history=history,
+                    review_ready=True,execution=dict(outcome='FINISHED' if state.get('container_complete',state.get('finalized')) else 'FAILED',recorder_closed=True))
+            write_json(path,document)
+            seal(bag,'complete' if state.get('container_complete',state.get('finalized')) else 'failed')
 
     def discard(self) -> dict[str, Any]:
         with self._operation_lock:
@@ -453,6 +475,16 @@ class CollectorController:
             return self.status()
 
     def dispatch(self, command: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+        if command == "configure_recording":
+            with self._operation_lock:
+                if self._recorder.current_bag_dir is not None or self._phase in {'STOPPING','VALIDATING'}:
+                    raise RuntimeError('请先完成本段录制和校验')
+                if self._storage and (self._storage.get('state')!='saved' or self._quality is None):
+                    raise RuntimeError('请先完成本段评级')
+                if not hasattr(self._node,'configure_recording'):raise RuntimeError('请更新采集器')
+                self._node.configure_recording(arguments or {})
+                self._ready=True
+            return self.status()
         if command == "rate_quality":
             arguments = arguments or {}
             return self.rate_quality(str(arguments.get("episode") or ""), str(arguments.get("quality") or ""))
@@ -463,7 +495,7 @@ class CollectorController:
         if command == "status":
             return self.status()
         if command == "start":
-            return self.start((arguments or {}).get("return_arm_home"), (arguments or {}).get("storage_parent"))
+            return self.start((arguments or {}).get("return_arm_home"), (arguments or {}).get("storage_parent"), (arguments or {}).get("task_metadata"))
         if command == "stop":
             return self.request_stop() if self._monitor is not None or self._after_home else self.stop()
         if command == "discard":
@@ -477,6 +509,8 @@ def _read_collection_state(bag_dir: Path | None) -> dict[str, Any]:
     if bag_dir is None:
         return {}
     path = bag_dir / "collection_state.json"
+    if not path.is_file() and (bag_dir/'episode.json').is_file():
+        return json.loads((bag_dir/'episode.json').read_text()).get('collection',{})
     if not path.is_file():
         return {
             "state": "incomplete",

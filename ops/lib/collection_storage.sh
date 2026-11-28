@@ -18,3 +18,7 @@ import sys
 print(json.dumps(sys.argv[1:]))
 PY
 )"
+
+collection_recording_config="${COLLECTION_RECORDING_CONFIG:-$HOME/.config/gello-teleop/recording.json}"
+collection_mcap_profile="${COLLECTION_MCAP_PROFILE:-$(dirname -- "$collection_recording_config")/mcap-profile.yaml}"
+collection_storage_mounts+=(-e "COLLECTION_RECORDING_CONFIG=$collection_recording_config" -e "COLLECTION_MCAP_PROFILE=$collection_mcap_profile")

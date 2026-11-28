@@ -37,7 +37,8 @@ def mount_for(path):
 
 
 def ready_state(source):
-    state = json.loads((source/'collection_state.json').read_text())
+    from .mcap_archive import collection_state
+    state = collection_state(source)
     storage = state.get('storage') or {}
     home = state.get('after_home') or {}
     if state.get('transfer_ready') is False:
@@ -129,15 +130,57 @@ class Operation:
             raise RuntimeError('录制编号已变化')
         return source,remote,mounted
 
+    def shared_assets(self, source, *, copy=False, read_back=True):
+        from .mcap_archive import assets
+        root=source.parent.parent
+        evidence={}
+        for asset in assets(source):
+            inventory=source_inventory(asset) if asset.is_dir() else {asset.name:[asset.stat().st_size,asset.stat().st_mtime_ns,asset.stat().st_ino]}
+            relative=asset.relative_to(root)
+            target=Path('.')/relative
+            staging=Path('.uploading')/('asset-'+self.job['id'])/relative
+            files={name:asset/name for name in inventory} if asset.is_dir() else {asset.name:asset}
+            hashes={name:self.digest(path,'校验共享资产') for name,path in files.items()}
+            if copy and not target.exists():
+                for name,path in files.items():
+                    out=staging/name if asset.is_dir() else staging
+                    out.parent.mkdir(parents=True,exist_ok=True)
+                    partial=out.with_name(out.name+'.part')
+                    with path.open('rb') as reader,partial.open('wb') as writer:
+                        while chunk:=reader.read(CHUNK):writer.write(chunk);self.progress('上传共享资产',len(chunk))
+                        writer.flush();os.fsync(writer.fileno())
+                    partial.replace(out)
+                # Assets are verified before any referencing episode is published.
+                for name in files:
+                    out=staging/name if asset.is_dir() else staging
+                    if self.digest(out,'读回共享资产')!=hashes[name]:raise RuntimeError('共享资产上传损坏')
+                target.parent.mkdir(parents=True,exist_ok=True)
+                try:staging.rename(target)
+                except OSError:
+                    if not target.exists():raise
+            for name,path in files.items():
+                out=target/name if asset.is_dir() else target
+                if read_back:
+                    if self.digest(out,'读回共享资产')!=hashes[name]:raise RuntimeError('远端共享资产冲突或损坏')
+                elif out.stat().st_size!=path.stat().st_size:raise RuntimeError('远端共享资产不完整')
+            evidence[str(relative)]=hashes
+        return evidence
+
+    def receipt_path(self, source, destination):
+        # A transport receipt is not part of a sealed MCAP episode.
+        return (Path('.upload-receipts')/self.job['folder']/(source.name+'.json')
+                if (source/'data.mcap').is_file() else destination/'.upload-receipt.json')
+
     def copy_upload(self):
         source,remote,mounted=self.remote_context()
+        asset_evidence=self.shared_assets(source,copy=True)
         inventory=source_inventory(source)
         hashes={}
         destination=Path('.')/self.job['folder']/source.name
         reused=destination.exists()
         if reused:
             hashes={name:self.digest(source/name,'计算本地校验') for name in inventory}
-            old=json.loads((destination/'.upload-receipt.json').read_text())
+            old=json.loads(self.receipt_path(source,destination).read_text())
             if old.get('recording_id')!=self.job['recording_id'] or old.get('hashes')!=hashes:
                 raise RuntimeError(f'远端同名数据冲突，不覆盖：{destination}')
         else:
@@ -161,13 +204,15 @@ class Operation:
             raise RuntimeError('上传过程中源数据或远端挂载发生变化，本地数据保留')
         # This is only a copy manifest, NEVER a deletion authorization.
         return dict(inventory=inventory,hashes=hashes,recording_id=self.job['recording_id'],
-                    mount=list(mounted),reused=reused)
+                    mount=list(mounted),reused=reused,assets=asset_evidence)
 
     def verify_upload(self, manifest=None, *, read_back=True):
         manifest=manifest or self.job.get('manifest')
         if not manifest:
             raise RuntimeError('缺少上传清单，本地数据保留')
         source,remote,mounted=self.remote_context()
+        asset_evidence=self.shared_assets(source,read_back=read_back)
+        if asset_evidence!=manifest.get('assets',{}):raise RuntimeError('共享资产引用已变化')
         inventory=manifest['inventory']; hashes=manifest['hashes']
         if (manifest['recording_id']!=self.job['recording_id'] or
                 list(mounted)!=manifest['mount'] or source_inventory(source)!=inventory):
@@ -177,7 +222,7 @@ class Operation:
         reused=manifest['reused'] or destination.exists()
         target=destination if reused else staging
         if reused:
-            receipt=json.loads((destination/'.upload-receipt.json').read_text())
+            receipt=json.loads(self.receipt_path(source,destination).read_text())
             if receipt.get('recording_id')!=self.job['recording_id'] or receipt.get('hashes')!=hashes:
                 raise RuntimeError('远端同名数据冲突，不覆盖')
         for name in inventory:
@@ -191,7 +236,7 @@ class Operation:
         if not reused:
             receipt=dict(recording_id=self.job['recording_id'],hashes=hashes,inventory=inventory,
                          readback_verified=read_back)
-            atomic_json(staging/'.upload-receipt.json',receipt)
+            if not (source/'data.mcap').is_file():atomic_json(staging/'.upload-receipt.json',receipt)
             destination.parent.mkdir(parents=True,exist_ok=True)
             reservation=Path('.upload-locks')/self.job['folder']/source.name
             reservation.parent.mkdir(parents=True,exist_ok=True)
@@ -203,13 +248,14 @@ class Operation:
                     raise RuntimeError('远端同名上传正在进行或上次任务未收尾，不覆盖')
             if destination.exists():
                 raise RuntimeError(f'远端同名目录已存在，不覆盖：{destination}')
+            if (source/'data.mcap').is_file():atomic_json(self.receipt_path(source,destination),receipt)
             staging.rename(destination)
             (reservation/'owner.json').unlink()
             reservation.rmdir()
         if source_inventory(source)!=inventory or mount_for(remote)!=mounted:
             raise RuntimeError('发布期间源或挂载变化，本地数据保留')
         return dict(destination=str(remote/self.job['folder']/source.name),inventory=inventory,
-                    hashes=hashes,recording_id=self.job['recording_id'],mount=list(mounted),readback_verified=read_back,transfer_completed=True)
+                    hashes=hashes,assets=asset_evidence,recording_id=self.job['recording_id'],mount=list(mounted),readback_verified=read_back,transfer_completed=True)
 
     def upload(self):
         """Synchronous helper; the daemon schedules these stages independently."""
@@ -223,6 +269,9 @@ class Operation:
             raise RuntimeError('源 episode 不能是符号链接')
         source=source.resolve(strict=True)
         parent=source.parent.parent
+        if (source/'data.mcap').is_file() and self.job.get('proof'):
+            self.remote_context()
+            self.shared_assets(source,read_back=True)
         # Shared with the collector only for tiny local metadata/rename operations;
         # no network operation ever holds this lock.
         with (parent/'.episode-files.lock').open('a') as lock:

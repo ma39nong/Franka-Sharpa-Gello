@@ -52,6 +52,32 @@ def allocate_episode(output: Path, prefix: str, parent: Path | None) -> Path:
     Allocation is persisted in the original recording group's directory, which
     stays fixed even when the user selects another storage parent.
     """
+    if parent is not None and prefix=='episode':
+        from .mcap_util import write_json
+        parent.mkdir(parents=True,exist_ok=True)
+        lock_name='.data_quality.lock'
+        try:
+            with (parent/'run.log').open() as stream:
+                if stream.readline().strip()=='[record-layout compact-v1]':lock_name='run.log'
+        except OSError:pass
+        with (parent/lock_name).open('a') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX)
+            counter=parent/'.episode_sequence.json'
+            last=json.loads(counter.read_text())['last'] if counter.exists() else -1
+            previous=output/f'.{prefix}.next'
+            if previous.exists():last=max(last,int(previous.read_text())-1)
+            for directory in [output,*[parent/folder for folder in ('pending','.pending','A','B','C','D')]]:
+                if not directory.exists():continue
+                for child in directory.iterdir():
+                    match=re.fullmatch(r'episode(\d+)',child.name)
+                    if match:last=max(last,int(match[1]))
+            write_json(counter,{'last':last+1})
+            output.mkdir(parents=True,exist_ok=True)
+            write_json(previous,last+2)
+            descriptor=os.open(parent,os.O_RDONLY|os.O_DIRECTORY)
+            try:os.fsync(descriptor)
+            finally:os.close(descriptor)
+            return parent/'pending'/f'episode{last+1}'
     output.mkdir(parents=True, exist_ok=True)
     counter = output / f".{prefix}.next"
     pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
